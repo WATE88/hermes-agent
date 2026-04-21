@@ -33,7 +33,8 @@ import LogsPage from "@/pages/LogsPage";
 import AnalyticsPage from "@/pages/AnalyticsPage";
 import CronPage from "@/pages/CronPage";
 import SkillsPage from "@/pages/SkillsPage";
-import { LanguageSwitcher } from "@/components/LanguageSwitcher";
+import ChatPage from "@/pages/ChatPage";
+import { LanguageSwitcher} from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { useI18n } from "@/i18n";
 import { usePlugins } from "@/plugins";
@@ -58,6 +59,7 @@ const BUILTIN_NAV: NavItem[] = [
   { path: "/skills", labelKey: "skills", label: "Skills", icon: Package },
   { path: "/config", labelKey: "config", label: "Config", icon: Settings },
   { path: "/env", labelKey: "keys", label: "Keys", icon: KeyRound },
+  { path: "/chat", labelKey: "chat", label: "Chat", icon: MessageSquare },
 ];
 
 // Plugins can reference any of these by name in their manifest — keeps bundle
@@ -237,6 +239,7 @@ export default function App() {
           <Route path="/skills" element={<SkillsPage />} />
           <Route path="/config" element={<ConfigPage />} />
           <Route path="/env" element={<EnvPage />} />
+          <Route path="/chat" element={<ChatPage />} />
 
           {plugins.map(({ manifest, component: PluginComponent }) => (
             <Route
