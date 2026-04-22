@@ -18,6 +18,11 @@ from hermes_cli.env_loader import load_hermes_dotenv
 _hermes_home = get_hermes_home()
 load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).parent.parent / ".env")
 
+# Force UTF-8 on Windows stdout/stderr to avoid GBK encoding errors
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 try:
     from hermes_cli.banner import prefetch_update_check
     prefetch_update_check()

@@ -101,6 +101,8 @@ _PUBLIC_API_PATHS: frozenset = frozenset({
     "/api/dashboard/themes",
     "/api/dashboard/plugins",
     "/api/dashboard/plugins/rescan",
+    "/api/chat",
+    "/api/models",
 })
 
 
@@ -2515,6 +2517,99 @@ def _mount_plugin_api_routes():
 
 # Mount plugin API routes before the SPA catch-all.
 _mount_plugin_api_routes()
+
+# ---------------------------------------------------------------------------
+# Chat API endpoint
+# ---------------------------------------------------------------------------
+
+class ChatMessage(BaseModel):
+    message: str
+    model: Optional[str] = None
+    system_prompt: Optional[str] = None
+
+
+@app.post("/api/chat")
+async def chat(body: ChatMessage):
+    """Simple chat endpoint - sends message to LLM and returns response."""
+    import httpx
+    
+    config = load_config()
+    env = load_env()
+    
+    # Get model config
+    model_config = config.get("model", {})
+    provider = model_config.get("provider", "siliconflow")
+    default_model = model_config.get("default", "Pro/zai-org/GLM-5")
+    
+    # Use specified model or default
+    model = body.model or default_model
+    
+    # Build messages
+    messages = []
+    if body.system_prompt:
+        messages.append({"role": "system", "content": body.system_prompt})
+    messages.append({"role": "user", "content": body.message})
+    
+    # Get API key based on provider
+    api_key = None
+    base_url = None
+    
+    if provider == "siliconflow" or "siliconflow" in model.lower():
+        api_key = env.get("SILICONFLOW_API_KEY")
+        base_url = "https://api.siliconflow.cn/v1"
+    elif provider == "openai" or "openai" in model.lower():
+        api_key = env.get("OPENAI_API_KEY")
+        base_url = "https://api.openai.com/v1"
+    else:
+        # Default to SiliconFlow
+        api_key = env.get("SILICONFLOW_API_KEY")
+        base_url = "https://api.siliconflow.cn/v1"
+    
+    if not api_key:
+        raise HTTPException(status_code=400, detail="No API key configured")
+    
+    # Call the API
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"{base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "stream": False
+                }
+            )
+            if response.status_code != 200:
+                return {"error": f"API error: {response.status_code}", "detail": response.text}
+            
+            result = response.json()
+            content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            
+            return {
+                "message": content,
+                "model": model,
+                "usage": result.get("usage", {})
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/models")
+async def list_models():
+    """Return available models from config."""
+    config = load_config()
+    model_config = config.get("model", {})
+    
+    return {
+        "default": model_config.get("default", "Pro/zai-org/GLM-5"),
+        "provider": model_config.get("provider", "siliconflow"),
+        "context_length": model_config.get("context_length", 1000000)
+    }
+
 
 mount_spa(app)
 

@@ -72,6 +72,11 @@ def _has_env(name: str) -> bool:
     val = os.getenv(name)
     return bool(val and val.strip())
 
+def _has_prosearch() -> bool:
+    """Check if OpenClaw ProSearch wrapper script is available."""
+    path = os.environ.get("PROSEARCH_SCRIPT", r"C:\Program Files\QClaw\resources\openclaw\config\skills\online-search\scripts\prosearch.cjs")
+    return os.path.exists(path)
+
 def _load_web_config() -> dict:
     """Load the ``web:`` section from ~/.hermes/config.yaml."""
     try:
@@ -88,13 +93,14 @@ def _get_backend() -> str:
     keys manually without running setup.
     """
     configured = (_load_web_config().get("backend") or "").lower().strip()
-    if configured in ("parallel", "firecrawl", "tavily", "exa"):
+    if configured in ("parallel", "firecrawl", "tavily", "exa", "prosearch"):
         return configured
 
     # Fallback for manual / legacy config — pick the highest-priority
     # available backend. Firecrawl also counts as available when the managed
     # tool gateway is configured for Nous subscribers.
     backend_candidates = (
+        ("prosearch", _has_prosearch()),
         ("firecrawl", _has_env("FIRECRAWL_API_KEY") or _has_env("FIRECRAWL_API_URL") or _is_tool_gateway_ready()),
         ("parallel", _has_env("PARALLEL_API_KEY")),
         ("tavily", _has_env("TAVILY_API_KEY")),
@@ -117,7 +123,63 @@ def _is_backend_available(backend: str) -> bool:
         return check_firecrawl_api_key()
     if backend == "tavily":
         return _has_env("TAVILY_API_KEY")
+    if backend == "prosearch":
+        return _has_prosearch()
     return False
+
+def _prosearch_search(query: str, limit: int = 5) -> dict:
+    """Search using OpenClaw ProSearch via local gateway.
+
+    Requires: prosearch.cjs script at the standard OpenClaw install path.
+    This backend is checked FIRST (highest priority) and falls back to
+    Firecrawl/Tavily/etc only if prosearch is unavailable.
+    """
+    import subprocess, json, os
+
+    script = os.environ.get(
+        "PROSEARCH_SCRIPT",
+        r"C:\Program Files\QClaw\resources\openclaw\config\skills\online-search\scripts\prosearch.cjs"
+    )
+    try:
+        result = subprocess.run(
+            ["node", script, "--keyword=" + query, "--cnt=" + str(limit)],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20
+        )
+        if result.returncode != 0:
+            return {"success": False, "error": result.stderr}
+
+        raw = result.stdout
+        if not raw:
+            return {"success": False, "error": "Empty response from search backend"}
+        data = json.loads(raw)
+        if not data.get("success"):
+            return {"success": False, "error": data.get("message", "Search failed")}
+
+        docs = data.get("data", {}).get("docs", [])
+        web_results = [
+            {
+                "title": d.get("title", ""),
+                "url": d.get("url", ""),
+                "description": d.get("passage", "")[:300],
+                "position": i + 1,
+                "source": d.get("site", ""),
+                "date": d.get("date", ""),
+            }
+            for i, d in enumerate(docs[:limit])
+        ]
+        return {
+            "success": True,
+            "data": {"web": web_results, "total": data.get("data", {}).get("totalResults", len(web_results))},
+        }
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": "Search timed out after 20s"}
+    except json.JSONDecodeError as e:
+        return {"success": False, "error": f"JSON parse error: {e}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 # ─── Firecrawl Client ────────────────────────────────────────────────────────
 
@@ -1111,6 +1173,15 @@ def web_search_tool(query: str, limit: int = 5) -> str:
                 "include_images": False,
             })
             response_data = _normalize_tavily_search_results(raw)
+            debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
+            result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
+            debug_call_data["final_response_size"] = len(result_json)
+            _debug.log_call("web_search_tool", debug_call_data)
+            _debug.save()
+            return result_json
+
+        if backend == "prosearch":
+            response_data = _prosearch_search(query, limit)
             debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
             result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
             debug_call_data["final_response_size"] = len(result_json)

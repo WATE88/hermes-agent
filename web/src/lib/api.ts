@@ -208,20 +208,21 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
     }),
+
+  // Chat API
+  chat: (message: string, context?: string) =>
+    fetchJSON<ChatResponse>("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message, context }),
+    }),
 };
 
-export interface ActionResponse {
-  name: string;
+// Chat types
+export interface ChatResponse {
   ok: boolean;
-  pid: number;
-}
-
-export interface ActionStatusResponse {
-  exit_code: number | null;
-  lines: string[];
-  name: string;
-  pid: number | null;
-  running: boolean;
+  message?: string;
+  error?: string;
 }
 
 export interface PlatformStatus {
