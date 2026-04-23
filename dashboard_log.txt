@@ -1,0 +1,8 @@
+HERMES_WEB_DIST = 'C:\\Users\\Admin\\.qclaw\\workspace-agent-5ae09493\\hermes-agent\\hermes_cli\\web_dist'
+WEB_DIST from module = WindowsPath('C:/Users/Admin/.qclaw/workspace-agent-5ae09493/hermes-agent/hermes_cli/web_dist')
+assets dir = True
+Starting uvicorn...
+INFO:     Started server process [22032]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:9119 (Press CTRL+C to quit)
