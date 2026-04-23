@@ -378,13 +378,21 @@ class HermesACPAgent(acp.Agent):
         mcp_servers: list | None = None,
         **kwargs: Any,
     ) -> NewSessionResponse:
-        state = self.session_manager.create_session(cwd=cwd)
+        # create_session and _build_model_state contain synchronous blocking
+        # operations (config loading, HTTP /models probe). Run them in a
+        # thread to avoid blocking the asyncio event loop.
+        logger.info("new_session: step1 create_session (threaded)...")
+        state = await asyncio.to_thread(self.session_manager.create_session, cwd=cwd)
+        logger.info("new_session: step2 _register_session_mcp_servers...")
         await self._register_session_mcp_servers(state, mcp_servers)
-        logger.info("New session %s (cwd=%s)", state.session_id, cwd)
+        logger.info("new_session: step3 schedule commands...")
         self._schedule_available_commands_update(state.session_id)
+        logger.info("new_session: step4 _build_model_state (threaded)...")
+        models = await asyncio.to_thread(self._build_model_state, state)
+        logger.info("new_session: step5 done, session_id=%s", state.session_id)
         return NewSessionResponse(
             session_id=state.session_id,
-            models=self._build_model_state(state),
+            models=models,
         )
 
     async def load_session(
@@ -401,7 +409,8 @@ class HermesACPAgent(acp.Agent):
         await self._register_session_mcp_servers(state, mcp_servers)
         logger.info("Loaded session %s", session_id)
         self._schedule_available_commands_update(session_id)
-        return LoadSessionResponse(models=self._build_model_state(state))
+        models = await asyncio.to_thread(self._build_model_state, state)
+        return LoadSessionResponse(models=models)
 
     async def resume_session(
         self,
@@ -413,11 +422,12 @@ class HermesACPAgent(acp.Agent):
         state = self.session_manager.update_cwd(session_id, cwd)
         if state is None:
             logger.warning("resume_session: session %s not found, creating new", session_id)
-            state = self.session_manager.create_session(cwd=cwd)
+            state = await asyncio.to_thread(self.session_manager.create_session, cwd=cwd)
         await self._register_session_mcp_servers(state, mcp_servers)
         logger.info("Resumed session %s", state.session_id)
         self._schedule_available_commands_update(state.session_id)
-        return ResumeSessionResponse(models=self._build_model_state(state))
+        models = await asyncio.to_thread(self._build_model_state, state)
+        return ResumeSessionResponse(models=models)
 
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
         state = self.session_manager.get_session(session_id)

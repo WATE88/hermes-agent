@@ -103,6 +103,7 @@ _PUBLIC_API_PATHS: frozenset = frozenset({
     "/api/dashboard/plugins/rescan",
     "/api/chat",
     "/api/models",
+    "/api/chat/conversations",
 })
 
 
@@ -206,7 +207,7 @@ async def host_header_middleware(request: Request, call_next):
 async def auth_middleware(request: Request, call_next):
     """Require the session token on all /api/ routes except the public list."""
     path = request.url.path
-    if path.startswith("/api/") and path not in _PUBLIC_API_PATHS and not path.startswith("/api/plugins/"):
+    if path.startswith("/api/") and path not in _PUBLIC_API_PATHS and not path.startswith("/api/plugins/") and not path.startswith("/api/chat/"):
         auth = request.headers.get("authorization", "")
         expected = f"Bearer {_SESSION_TOKEN}"
         if not hmac.compare_digest(auth.encode(), expected.encode()):
@@ -2596,6 +2597,261 @@ async def chat(body: ChatMessage):
             }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Conversation Management API
+# ---------------------------------------------------------------------------
+
+CHAT_DIR = get_hermes_home() / "chat_conversations"
+CHAT_DIR.mkdir(exist_ok=True)
+
+
+class ConversationCreate(BaseModel):
+    title: Optional[str] = None
+
+
+class ConversationMessage(BaseModel):
+    role: str
+    content: str
+
+
+def _get_conversation_path(conv_id: str) -> Path:
+    return CHAT_DIR / f"{conv_id}.json"
+
+
+def _load_conversation(conv_id: str) -> Optional[Dict]:
+    path = _get_conversation_path(conv_id)
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return None
+
+
+def _save_conversation(conv: Dict):
+    path = _get_conversation_path(conv["id"])
+    path.write_text(json.dumps(conv, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+@app.get("/api/chat/conversations")
+async def list_conversations():
+    """List all conversations sorted by updated time."""
+    conversations = []
+    for f in CHAT_DIR.glob("*.json"):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            conversations.append({
+                "id": data["id"],
+                "title": data.get("title", "New Chat")[:40],
+                "created": data["created"],
+                "updated": data.get("updated", data["created"]),
+                "message_count": len(data.get("messages", []))
+            })
+        except:
+            pass
+    
+    # Sort by updated time (newest first)
+    conversations.sort(key=lambda x: x["updated"], reverse=True)
+    return {"conversations": conversations}
+
+
+@app.post("/api/chat/conversations")
+async def create_conversation(body: ConversationCreate = None):
+    """Create a new conversation."""
+    import uuid
+    from datetime import datetime
+    
+    conv_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
+    conv = {
+        "id": conv_id,
+        "title": body.title if body and body.title else "New Chat",
+        "created": datetime.now().isoformat(),
+        "updated": datetime.now().isoformat(),
+        "messages": []
+    }
+    _save_conversation(conv)
+    return conv
+
+
+@app.get("/api/chat/conversations/{conv_id}")
+async def get_conversation(conv_id: str):
+    """Get conversation by ID."""
+    conv = _load_conversation(conv_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conv
+
+
+@app.delete("/api/chat/conversations/{conv_id}")
+async def delete_conversation(conv_id: str):
+    """Delete a conversation."""
+    path = _get_conversation_path(conv_id)
+    if path.exists():
+        path.unlink()
+        return {"ok": True}
+    raise HTTPException(status_code=404, detail="Conversation not found")
+
+
+async def _simple_api_call(conv: dict, config: dict, env: dict) -> str:
+    """Fallback simple API call without tools."""
+    import httpx
+    
+    model_config = config.get("model", {})
+    provider = model_config.get("provider", "siliconflow")
+    default_model = model_config.get("default", "Pro/zai-org/GLM-5")
+    
+    # Build messages for API
+    api_messages = []
+    for msg in conv["messages"][-20:]:
+        api_messages.append({
+            "role": msg["role"],
+            "content": msg["content"]
+        })
+    
+    # Get API key and base URL
+    if provider == "siliconflow" or "siliconflow" in default_model.lower():
+        api_key = env.get("SILICONFLOW_API_KEY")
+        base_url = "https://api.siliconflow.cn/v1"
+    else:
+        api_key = env.get("OPENAI_API_KEY")
+        base_url = "https://api.openai.com/v1"
+    
+    if not api_key:
+        return "No API key configured"
+    
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"{base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": default_model,
+                    "messages": api_messages,
+                    "stream": False
+                }
+            )
+            if response.status_code != 200:
+                return f"API Error: {response.status_code}"
+            result = response.json()
+            return result.get("choices", [{}])[0].get("message", {}).get("content", "No response")
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+@app.post("/api/chat/conversations/{conv_id}/messages")
+async def send_message_to_conversation(conv_id: str, body: ConversationMessage):
+    """Send a message to a conversation and get AI response with tool calling."""
+    import httpx
+    import uuid
+    import json
+    from datetime import datetime
+    
+    # Load or create conversation
+    conv = _load_conversation(conv_id)
+    if not conv:
+        conv = {
+            "id": conv_id,
+            "title": "New Chat",
+            "created": datetime.now().isoformat(),
+            "updated": datetime.now().isoformat(),
+            "messages": []
+        }
+    
+    # Add user message
+    user_msg = {
+        "id": str(uuid.uuid4()),
+        "role": "user",
+        "content": body.content,
+        "timestamp": datetime.now().isoformat()
+    }
+    conv["messages"].append(user_msg)
+    
+    # Update title from first user message
+    if len(conv["messages"]) == 1:
+        conv["title"] = body.content[:40]
+    
+    # Get AI response using Hermes Agent with tools
+    try:
+        from run_agent import AIAgent
+        from model_tools import get_tool_definitions
+        
+        config = load_config()
+        env = load_env()
+        
+        model_config = config.get("model", {})
+        provider = model_config.get("provider", "siliconflow")
+        default_model = model_config.get("default", "Pro/zai-org/GLM-5")
+        
+        # Get API key and base URL
+        if provider == "siliconflow" or "siliconflow" in default_model.lower():
+            api_key = env.get("SILICONFLOW_API_KEY")
+            base_url = "https://api.siliconflow.cn/v1"
+        elif provider == "openai" or "openai" in default_model.lower():
+            api_key = env.get("OPENAI_API_KEY")
+            base_url = "https://api.openai.com/v1"
+        else:
+            api_key = env.get("SILICONFLOW_API_KEY")
+            base_url = "https://api.siliconflow.cn/v1"
+        
+        if not api_key:
+            raise HTTPException(status_code=400, detail="No API key configured")
+        
+        # Build conversation history for Agent
+        conversation_history = []
+        for msg in conv["messages"][-20:]:  # Last 20 messages
+            conversation_history.append({
+                "role": msg["role"],
+                "content": msg["content"]
+            })
+        
+        # Create Agent with file tools enabled
+        agent = AIAgent(
+            base_url=base_url,
+            api_key=api_key,
+            model=default_model,
+            max_iterations=10,  # Limit iterations for chat
+            quiet_mode=True,
+            enabled_toolsets=["file", "shell"],  # Enable file and shell tools
+        )
+        
+        # Run agent in thread pool (since it's synchronous)
+        import asyncio
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: agent.run_conversation(
+                user_message=body.content,
+                conversation_history=conversation_history[:-1] if len(conversation_history) > 1 else None,
+            )
+        )
+        
+        # Extract final response
+        ai_content = result.get("final_response", "No response")
+        
+    except ImportError as e:
+        # Fallback to simple API call if Agent not available
+        _log.warning(f"AIAgent not available, falling back to simple API: {e}")
+        ai_content = await _simple_api_call(conv, config, env)
+    except Exception as e:
+        _log.error(f"Agent error: {e}")
+        ai_content = f"Error: {str(e)}"
+    
+    # Add AI response
+    ai_msg = {
+        "id": str(uuid.uuid4()),
+        "role": "assistant",
+        "content": ai_content,
+        "timestamp": datetime.now().isoformat()
+    }
+    conv["messages"].append(ai_msg)
+    
+    # Save conversation
+    conv["updated"] = datetime.now().isoformat()
+    _save_conversation(conv)
+    
+    return {"message": ai_msg, "conversation": conv}
 
 
 @app.get("/api/models")
