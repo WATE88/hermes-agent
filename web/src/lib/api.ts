@@ -232,6 +232,24 @@ export interface PlatformStatus {
   updated_at: string;
 }
 
+export interface ActionResponse {
+  ok: boolean;
+  action?: string;
+  status?: string;
+  message?: string;
+}
+
+export interface ActionStatusResponse {
+  name: string;
+  status: string;
+  running?: boolean;
+  lines?: string[];
+  output?: string;
+  exit_code?: number;
+  started_at?: string;
+  completed_at?: string;
+}
+
 export interface StatusResponse {
   active_sessions: number;
   config_path: string;
